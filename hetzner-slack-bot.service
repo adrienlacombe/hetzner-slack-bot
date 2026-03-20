@@ -4,9 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
-User=hetzner-bot
+User=root
 WorkingDirectory=/opt/hetzner-slack-bot
-ExecStart=/usr/bin/node app.js
+ExecStart=/root/.nvm/versions/node/v24.14.0/bin/node app.js
 EnvironmentFile=/opt/hetzner-slack-bot/.env
 Restart=always
 RestartSec=5
