@@ -8,10 +8,24 @@ const app = new App({
   appToken: process.env.SLACK_APP_TOKEN,
 });
 
+// ─── Access control ────────────────────────────────────────────────────────────
+
+const ALLOWED_USERS = process.env.ALLOWED_USER_IDS
+  ? new Set(process.env.ALLOWED_USER_IDS.split(',').map((id) => id.trim()))
+  : null; // null = no restriction
+
+function isAllowed(userId) {
+  return !ALLOWED_USERS || ALLOWED_USERS.has(userId);
+}
+
 // ─── /hetzner slash command ────────────────────────────────────────────────────
 
 app.command('/hetzner', async ({ command, ack, respond }) => {
   await ack();
+  if (!isAllowed(command.user_id)) {
+    await respond({ response_type: 'ephemeral', text: 'You are not authorized to use this command.' });
+    return;
+  }
   await respond({
     response_type: 'ephemeral',
     text: 'Hetzner Cloud Manager',
@@ -60,29 +74,22 @@ app.action('action_create_vm', async ({ ack, body, client }) => {
     await client.views.open({ trigger_id: body.trigger_id, view });
   } catch (err) {
     console.error('Failed to open create VM modal:', err.message);
-    await client.chat.postEphemeral({
-      channel: body.channel.id,
-      user: body.user.id,
+    await client.chat.postMessage({
+      channel: body.user.id,
       text: `Failed to load Hetzner options: ${err.message}`,
     });
   }
 });
 
-// ─── Create VM: form submission → confirmation ─────────────────────────────────
+// ─── Create VM Step 1: name + type → push step 2 with filtered locations ─────
 
-app.view('create_vm_submit', async ({ ack, view }) => {
+app.view('create_vm_step1_submit', async ({ ack, view }) => {
   const vals = view.state.values;
-
-  const config = {
-    name: vals.server_name.name_input.value,
-    server_type: vals.server_type.type_select.selected_option.value,
-    location: vals.location.location_select.selected_option.value,
-    image: vals.image.image_select.selected_option.value,
-    ssh_keys: vals.ssh_keys?.ssh_select?.selected_options?.map((o) => o.value) || [],
-  };
+  const name = vals.server_name.name_input.value;
+  const serverType = vals.server_type.type_select.selected_option.value;
 
   // Validate server name (RFC 1123 hostname)
-  if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(config.name)) {
+  if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(name)) {
     await ack({
       response_action: 'errors',
       errors: {
@@ -92,6 +99,24 @@ app.view('create_vm_submit', async ({ ack, view }) => {
     });
     return;
   }
+
+  const step2View = await modals.buildCreateVMStep2(name, serverType);
+  await ack({ response_action: 'push', view: step2View });
+});
+
+// ─── Create VM Step 2: location + image + ssh → push confirmation ────────────
+
+app.view('create_vm_step2_submit', async ({ ack, view }) => {
+  const vals = view.state.values;
+  const metadata = JSON.parse(view.private_metadata);
+
+  const config = {
+    name: metadata.name,
+    server_type: metadata.server_type,
+    location: vals.location.location_select.selected_option.value,
+    image: vals.image.image_select.selected_option.value,
+    ssh_keys: vals.ssh_keys?.ssh_select?.selected_options?.map((o) => o.value) || [],
+  };
 
   await ack({
     response_action: 'push',
@@ -158,6 +183,9 @@ app.view('confirm_vm_create', async ({ ack, view, body, client }) => {
       text: `Server ${server.name} created — IP: ${ipv4}`,
       blocks,
     });
+
+    // Poll until server is running, then notify
+    pollServerReady(client, userId, server.id, server.name);
   } catch (err) {
     const errorMsg = err.response?.data?.error?.message || err.message;
     await client.chat.postMessage({
@@ -171,13 +199,13 @@ app.view('confirm_vm_create', async ({ ack, view, body, client }) => {
 
 app.action('action_list_vms', async ({ ack, body, client }) => {
   await ack();
+  const userId = body.user.id;
   try {
     const servers = await hetzner.listServers();
 
     if (servers.length === 0) {
-      await client.chat.postEphemeral({
-        channel: body.channel.id,
-        user: body.user.id,
+      await client.chat.postMessage({
+        channel: userId,
         text: 'No servers found in this Hetzner project.',
       });
       return;
@@ -208,16 +236,14 @@ app.action('action_list_vms', async ({ ack, body, client }) => {
       blocks.push({ type: 'divider' });
     }
 
-    await client.chat.postEphemeral({
-      channel: body.channel.id,
-      user: body.user.id,
+    await client.chat.postMessage({
+      channel: userId,
       text: `Found ${servers.length} server(s)`,
       blocks,
     });
   } catch (err) {
-    await client.chat.postEphemeral({
-      channel: body.channel.id,
-      user: body.user.id,
+    await client.chat.postMessage({
+      channel: userId,
       text: `Failed to list servers: ${err.message}`,
     });
   }
@@ -231,9 +257,8 @@ app.action('action_delete_vm', async ({ ack, body, client }) => {
     const view = await modals.buildDeleteVMModal();
     await client.views.open({ trigger_id: body.trigger_id, view });
   } catch (err) {
-    await client.chat.postEphemeral({
-      channel: body.channel.id,
-      user: body.user.id,
+    await client.chat.postMessage({
+      channel: body.user.id,
       text: `Failed to load server list: ${err.message}`,
     });
   }
@@ -263,6 +288,41 @@ app.view('delete_vm_submit', async ({ ack, view, body, client }) => {
     });
   }
 });
+
+// ─── Poll server until ready ───────────────────────────────────────────────────
+
+async function pollServerReady(client, userId, serverId, serverName) {
+  const maxAttempts = 30;
+  const intervalMs = 5000;
+
+  for (let i = 0; i < maxAttempts; i++) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    try {
+      const server = await hetzner.getServer(serverId);
+      if (server.status === 'running') {
+        await client.chat.postMessage({
+          channel: userId,
+          text: `Server *${serverName}* is now running and ready to use.\nSSH: \`ssh root@${server.public_net.ipv4.ip}\``,
+        });
+        return;
+      }
+      if (server.status === 'off' || server.status === 'unknown') {
+        await client.chat.postMessage({
+          channel: userId,
+          text: `Server *${serverName}* ended up in status: *${server.status}*. Please check the Hetzner console.`,
+        });
+        return;
+      }
+    } catch (err) {
+      console.error(`Poll error for server ${serverId}:`, err.message);
+    }
+  }
+
+  await client.chat.postMessage({
+    channel: userId,
+    text: `Server *${serverName}* is still initializing after ${(maxAttempts * intervalMs) / 1000}s. Check the Hetzner console for status.`,
+  });
+}
 
 // ─── Start ─────────────────────────────────────────────────────────────────────
 

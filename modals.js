@@ -1,6 +1,8 @@
 const hetzner = require('./hetzner');
 
-// Group server types by CPU architecture for readability
+// Cache server types so step 2 can look up location availability
+let serverTypesCache = [];
+
 function groupServerTypes(serverTypes) {
   const groups = {};
   for (const st of serverTypes) {
@@ -18,15 +20,11 @@ function groupServerTypes(serverTypes) {
   return groups;
 }
 
+// Step 1: Server name + server type
 async function buildCreateVMStep1() {
-  const [serverTypes, locations, images, sshKeys] = await Promise.all([
-    hetzner.getServerTypes(),
-    hetzner.getLocations(),
-    hetzner.getImages(),
-    hetzner.getSSHKeys(),
-  ]);
+  serverTypesCache = await hetzner.getServerTypes();
 
-  const grouped = groupServerTypes(serverTypes);
+  const grouped = groupServerTypes(serverTypesCache);
   const serverTypeOptionGroups = Object.entries(grouped).map(([label, types]) => ({
     label: { type: 'plain_text', text: label },
     options: types
@@ -40,9 +38,61 @@ async function buildCreateVMStep1() {
       })),
   }));
 
-  const locationOptions = locations.map((l) => ({
-    text: { type: 'plain_text', text: `${l.city}, ${l.country} (${l.name})` },
-    value: l.name,
+  return {
+    type: 'modal',
+    callback_id: 'create_vm_step1_submit',
+    title: { type: 'plain_text', text: 'Create VM (1/2)' },
+    submit: { type: 'plain_text', text: 'Next' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks: [
+      {
+        type: 'input',
+        block_id: 'server_name',
+        label: { type: 'plain_text', text: 'Server Name' },
+        element: {
+          type: 'plain_text_input',
+          action_id: 'name_input',
+          placeholder: { type: 'plain_text', text: 'e.g. web-prod-01' },
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'server_type',
+        label: { type: 'plain_text', text: 'Server Type' },
+        element: {
+          type: 'static_select',
+          action_id: 'type_select',
+          placeholder: { type: 'plain_text', text: 'Choose a server type' },
+          option_groups: serverTypeOptionGroups,
+        },
+      },
+    ],
+  };
+}
+
+// Step 2: Location (filtered by server type) + Image + SSH keys
+async function buildCreateVMStep2(serverName, serverTypeName) {
+  const [datacenters, images, sshKeys] = await Promise.all([
+    hetzner.getDatacenters(),
+    hetzner.getImages(),
+    hetzner.getSSHKeys(),
+  ]);
+
+  // Find the server type ID from cache
+  const serverType = serverTypesCache.find((t) => t.name === serverTypeName);
+  const serverTypeId = serverType ? serverType.id : null;
+
+  // Filter datacenters to only those where this server type is actually available
+  const availableDCs = serverTypeId
+    ? datacenters.filter((dc) => dc.server_types.available.includes(serverTypeId))
+    : datacenters;
+
+  const locationOptions = availableDCs.map((dc) => ({
+    text: {
+      type: 'plain_text',
+      text: `${dc.location.city}, ${dc.location.country} (${dc.location.name})`,
+    },
+    value: dc.location.name,
   }));
 
   // Group images by OS flavor
@@ -65,28 +115,19 @@ async function buildCreateVMStep1() {
     value: String(k.id),
   }));
 
+  const metadata = JSON.stringify({ name: serverName, server_type: serverTypeName });
+
   const blocks = [
     {
-      type: 'input',
-      block_id: 'server_name',
-      label: { type: 'plain_text', text: 'Server Name' },
-      element: {
-        type: 'plain_text_input',
-        action_id: 'name_input',
-        placeholder: { type: 'plain_text', text: 'e.g. web-prod-01' },
-      },
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: `*Server:* ${serverName} | *Type:* ${serverTypeName}`,
+        },
+      ],
     },
-    {
-      type: 'input',
-      block_id: 'server_type',
-      label: { type: 'plain_text', text: 'Server Type' },
-      element: {
-        type: 'static_select',
-        action_id: 'type_select',
-        placeholder: { type: 'plain_text', text: 'Choose a server type' },
-        option_groups: serverTypeOptionGroups,
-      },
-    },
+    { type: 'divider' },
     {
       type: 'input',
       block_id: 'location',
@@ -111,7 +152,6 @@ async function buildCreateVMStep1() {
     },
   ];
 
-  // SSH key selection is optional
   if (sshKeyOptions.length > 0) {
     blocks.push({
       type: 'input',
@@ -129,10 +169,11 @@ async function buildCreateVMStep1() {
 
   return {
     type: 'modal',
-    callback_id: 'create_vm_submit',
-    title: { type: 'plain_text', text: 'Create Hetzner VM' },
+    callback_id: 'create_vm_step2_submit',
+    title: { type: 'plain_text', text: 'Create VM (2/2)' },
     submit: { type: 'plain_text', text: 'Review & Create' },
-    close: { type: 'plain_text', text: 'Cancel' },
+    close: { type: 'plain_text', text: 'Back' },
+    private_metadata: metadata,
     blocks,
   };
 }
@@ -241,6 +282,7 @@ async function buildDeleteVMModal() {
 
 module.exports = {
   buildCreateVMStep1,
+  buildCreateVMStep2,
   buildConfirmationModal,
   buildDeleteVMModal,
 };

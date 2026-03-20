@@ -10,13 +10,25 @@ function client() {
 }
 
 async function getServerTypes() {
-  const { data } = await client().get('/server_types', { params: { per_page: 50 } });
-  return data.server_types.filter((t) => !t.deprecated);
+  const allTypes = [];
+  let page = 1;
+  while (true) {
+    const { data } = await client().get('/server_types', { params: { per_page: 50, page } });
+    allTypes.push(...data.server_types);
+    if (page >= data.meta.pagination.last_page) break;
+    page++;
+  }
+  return allTypes.filter((t) => !t.deprecated);
 }
 
 async function getLocations() {
   const { data } = await client().get('/locations');
   return data.locations;
+}
+
+async function getDatacenters() {
+  const { data } = await client().get('/datacenters');
+  return data.datacenters;
 }
 
 async function getImages() {
@@ -64,6 +76,7 @@ async function deleteServer(id) {
 module.exports = {
   getServerTypes,
   getLocations,
+  getDatacenters,
   getImages,
   getSSHKeys,
   createServer,

@@ -1,0 +1,15 @@
+[Unit]
+Description=Hetzner Slack Bot
+After=network.target
+
+[Service]
+Type=simple
+User=hetzner-bot
+WorkingDirectory=/opt/hetzner-slack-bot
+ExecStart=/usr/bin/node app.js
+EnvironmentFile=/opt/hetzner-slack-bot/.env
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
