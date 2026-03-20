@@ -1,0 +1,14 @@
+{
+  "name": "hetzner-slack-bot",
+  "version": "1.0.0",
+  "description": "Slack bot for commissioning Hetzner Cloud infrastructure",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "node --watch app.js"
+  },
+  "dependencies": {
+    "@slack/bolt": "^4.1.0",
+    "axios": "^1.7.0"
+  }
+}
