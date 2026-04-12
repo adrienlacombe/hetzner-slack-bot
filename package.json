@@ -9,6 +9,6 @@
   },
   "dependencies": {
     "@slack/bolt": "^4.1.0",
-    "axios": "^1.7.0"
+    "axios": "^1.15.0"
   }
 }
